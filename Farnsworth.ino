@@ -1,10 +1,11 @@
 #include <ArduinoBLE.h>
-//#include <Arduino_LSM9DS1.h>
 #include <RunningAverage.h>
 //#include <NanoBLEFlashPrefs.h>
 #include <VescUart.h>
 
-// Cycle computer with cadence, speed and power.
+// Farnsworth
+
+// Open source cycle display and pedelec speed controller.
 // Controls VESC and reports via BLE using CP and Babelfish protocol.
 
 #include "constants.h"
@@ -29,8 +30,7 @@ int BatteryPercent = 100;  // start with 100% full
 // Babelfish motor service and characteristics
 BLEService motorService("FFF0");
 BLECharacteristic motorMeasurement("FFF1", BLERead | BLENotify, 14);
-BLECharacteristic motorSettingsRead("FFF2", BLERead | BLENotify, 7);
-BLECharacteristic motorResettableTrip("FFF4", BLERead | BLENotify, 8);
+BLECharacteristic motorSettings("FFF2", BLERead | BLENotify, 7);
 
 int sensor_pos = 11;      // sensor position magic number.
 // No idea what they mean (shitty specs) but it's mandatory to supply one.
@@ -38,7 +38,6 @@ int sensor_pos = 11;      // sensor position magic number.
 unsigned char bleBuffer[14];
 unsigned char slBuffer[1];
 unsigned char fBuffer[4];
-short power = 0;
 int connected = 0;
 int vesc_connected = 0;
 
@@ -57,13 +56,16 @@ RunningAverage filter(FILTER_SIZE);
 
 // Timing and counters
 volatile unsigned long previousMillis = 0;
+volatile unsigned long previousPowerCalc = 0;
 volatile unsigned long currentMillis = 0;
 
-// Counters for wheel and crank interrupt routines
+// Debouncing counters for wheel and crank interrupt routines
 volatile unsigned long time_prev_wheel = 0, time_now_wheel;
 volatile unsigned long time_prev_crank = 0, time_now_crank;
 volatile unsigned long time_chat_wheel = 100;  // dead zone for bounces
 volatile unsigned long time_chat_crank = 10;  // dead zone for bounces (crank)
+int state_prev_wheel = 1;
+int state_prev_crank = 1;
 
 // Counters for updating power and speed services
 volatile unsigned long wheelRev = 0;
@@ -71,27 +73,24 @@ volatile unsigned long oldWheelRev = 0;
 volatile unsigned long oldWheelMillis = 0;  // last time sent to BLE
 volatile unsigned long lastWheeltime = 0;   // last time measurement taken
 // Note: the wheel time is in half-ms (1/2048 sec), unlike CSC where it is in ms
+volatile float raw_torque = 0;              // torque in Nm read from sensor
+volatile float torque = 0;                  // averaged torque in Nm
 volatile float speed = 0;                   // calculated speed in metres/sec
 volatile float crpm = 0;                    // calculated crank rpm
+short power = 0;                            // human power in watts
 
 // Wheel circumference and initial speed limit for motor
 unsigned long circ = 2300;
-unsigned long limit = 25;
-int pas = 2;
+unsigned long speed_limit = 25;
 
 // PAS level for motor (1 = eco, 2 = tour, 3 = sport, etc.)
+int pas = 2;
 
 volatile unsigned int crankPulses = 0;
 volatile unsigned int crankRev = 0;
 volatile unsigned int oldCrankRev = 0;
 volatile unsigned long lastCranktime = 0;
 volatile unsigned long oldCrankMillis = 0;
-
-volatile unsigned int outputWheelRev = 0;
-volatile unsigned long outputWheeltime = 0;
-volatile unsigned int outputInterval = 0;
-volatile unsigned long outputPulseTime = 0;
-volatile unsigned long outputPulseLength = 0;
 
 
 // Fill the CP measurement array and send it
@@ -138,48 +137,32 @@ void fillMS()
   uint16_t range100 = 0;  // TODO Calculate this somehow
   uint16_t kmh100 = speed * 360;   // m/s to km/h*100
 
-  if (vesc_connected)   // We must have seen the VESC to get this data
+  if (!vesc_connected)   // We must have seen the VESC to get this data
     return;
 
   int n = 0;  // to facilitate adding and removing stuff
   bleBuffer[n++] = kmh100 & 0xff;		                // speed in km/h*100
   bleBuffer[n++] = (kmh100 >> 8) & 0xff;	   
   bleBuffer[n++] = crpm;			                      // cadence in rpm
-  bleBuffer[n++] = power & 0xff;		                // power in watts
-  bleBuffer[n++] = (power >> 8) & 0xff;	   
+  bleBuffer[n++] = (power * pas) & 0xff;		        // motor power in watts = human power * PAS level (0-5)
+  bleBuffer[n++] = ((power * pas) >> 8) & 0xff;	   
   bleBuffer[n++] = volts100 & 0xff;		              // battery volts*100
   bleBuffer[n++] = (volts100 >> 8) & 0xff;	   
   bleBuffer[n++] = amps100 & 0xff;		              // motor current in amps*100
   bleBuffer[n++] = (amps100 >> 8) & 0xff;	   
   bleBuffer[n++] = range100 & 0xff;		              // range in km*100  
   bleBuffer[n++] = (range100 >> 8) & 0xff;				      
-  bleBuffer[n++] = pas;			// PAS level (0-5)			      
+  bleBuffer[n++] = pas;			                        // PAS level (0-5)	TODO: Make this writable
   bleBuffer[n++] = (uint8_t)(VU.data.tempMotor + 40);		// Motor temp in degC + 40			      
   bleBuffer[n++] = (uint8_t)(VU.data.tempMosfet + 40);	// Controller temp in degC + 40		      
   motorMeasurement.writeValue(bleBuffer, n);				      
 
-#if 0              		      
   n = 0;								      
-  bleBuffer[n++] = settings.limit & 0xff;		        // speed limit in km/h*100		      
-  bleBuffer[n++] = (settings.limit >> 8) & 0xff;
-  bleBuffer[n++] = settings.circ & 0xff;		        // wheel circumference in mm
-  bleBuffer[n++] = (settings.circ >> 8) & 0xff;
-  bleBuffer[n++] = settings.wheel_size & 0xff;		  // Wheel size set similarly, in 12.4
-  bleBuffer[n++] = (settings.wheel_size >> 8) & 0xff; // (not used)
-  bleBuffer[n++] = settings.valid_read;             // Settings have been read (not used)
-  motorSettingsRead.writeValue(bleBuffer, n);
-
-  n = 0;
-  bleBuffer[n++] = display.odo & 0xff;		          // odometer in km/h
-  bleBuffer[n++] = (display.odo >> 8) & 0xff;	   
-  bleBuffer[n++] = display.trip & 0xff;		          // trip distamce in km*10
-  bleBuffer[n++] = (display.trip >> 8) & 0xff;	   
-  bleBuffer[n++] = display.avg_speed & 0xff;	      // average speed in km/h*10
-  bleBuffer[n++] = (display.avg_speed >> 8) & 0xff;
-  bleBuffer[n++] = display.max_speed & 0xff;	      // maximum speed in km/h*10
-  bleBuffer[n++] = (display.max_speed >> 8) & 0xff;
-  motorResettableTrip.writeValue(bleBuffer, n);
-#endif // 0  
+  bleBuffer[n++] = speed_limit & 0xff;		        // speed limit in km/h*100		      
+  bleBuffer[n++] = (speed_limit >> 8) & 0xff;
+  bleBuffer[n++] = circ & 0xff;		                  // wheel circumference in mm
+  bleBuffer[n++] = (circ >> 8) & 0xff;
+  motorSettings.writeValue(bleBuffer, n);
 }
 
 
@@ -192,8 +175,10 @@ void update_chars(bool calc_power, String sType)
   oldWheelRev = wheelRev;
   oldCrankRev = crankRev;
   oldWheelMillis = currentMillis;
+  oldCrankMillis = currentMillis;
   previousMillis = currentMillis;
   fillCP();
+  fillMS();
 
   // Some debug output to indicate what triggered the update
   Serial.print("Wheel Rev.: ");
@@ -208,10 +193,15 @@ void update_chars(bool calc_power, String sType)
   Serial.print(speed);
   Serial.print(" Cadence : ");
   Serial.print(crpm);
-  Serial.print(" Power : ");
-  Serial.print(power);
   Serial.print("  ");
   Serial.println(sType);
+
+  Serial.print("Torque raw ");
+  Serial.print(raw_torque);
+  Serial.print("Torque avg ");
+  Serial.print(torque);
+  Serial.print(" (Human)Power : ");
+  Serial.println(power);
 }
 
 // Interrupt routines trigger when a pulse is received (falling edge on pin)
@@ -233,11 +223,16 @@ void wheelAdd()
 // Take a torque sensor reading and convert it to an instananeous torque in Nm  // TODO what units?
 float readTorque()
 {
-  float torque = analogRead(TORQUE_PIN) / 20.0f;   
-  // TODO calibrate this. Standing voltage on torque pin with no torque is about 0.4V (after 3/5 v-divider)
-  // and we're told it is 35mV/Nm thereafter. Believe when see.
+  float read_torque = analogRead(TORQUE_PIN);   
 
-  return torque;
+  // TODO calibrate this properly. Standing voltage on torque pin with no torque is about 0.4V (after 3/5 v-divider)
+  // and we're told it is 35mV/Nm thereafter. Believe when see.
+  Serial.print("Torque ADC: ");
+  Serial.println(read_torque);
+  read_torque = (read_torque - STATIC_TORQUE) / TORQUE_SLOPE;
+  if (read_torque < 0)
+    read_torque = 0;
+  return read_torque;
 }
 
 // Cadence sensor triggers 32 times per crank revolution. Maintain a separate counter.
@@ -246,8 +241,9 @@ void crankAdd()
   time_now_crank = millis();
   if (time_now_crank > time_prev_crank + time_chat_crank) 
   {
-    // Read the torque every cadence pulse and add it in to the running average
-    filter.addValue(readTorque());
+    // Read the torque every cadence pulse and add it in to the running average.
+    raw_torque = readTorque();
+    filter.addValue(raw_torque);
 
     // Calculate the cadence rpm
     crpm = 60000L / (PULSES_PER_REV * (time_now_crank - time_prev_crank));
@@ -264,16 +260,36 @@ void crankAdd()
   }
 }
 
+// Poll the pins.
+void poll_wheel_crank_pins()
+{
+  int state_now_wheel, state_now_crank;
+
+  // Detect a falling edge of the pin
+  state_now_wheel = digitalRead(WHEEL_PIN);
+  if (state_now_wheel < state_prev_wheel)
+    wheelAdd();
+  state_prev_wheel = state_now_wheel;
+  
+
+  state_now_crank = digitalRead(CRANK_PIN);
+  if (state_now_crank < state_prev_crank)
+    crankAdd();
+  state_prev_crank = state_now_crank;
+}
+
 // Calculate power from average torque and cadence. Multiply by the PAS level
 // and send it down to the VESC as a motor current setting.
 void updateVESC()
 {
-  float torque = filter.getAverage();
+  torque = filter.getAverage();
   power = torque * crpm * (TWO_PI / 60);   // the human average power in watts
 
   // Get VESC stats
   if ( VU.getVescValues() )
   {
+    float current;
+
     Serial.print("RPM ");
     Serial.print(VU.data.rpm / NUM_POLE_PAIRS);
     Serial.print(" Volts ");
@@ -288,15 +304,44 @@ void updateVESC()
     Serial.print(VU.data.tempMotor);
     Serial.println();
 
-    // Set motor current based on power and PAS multiplier
+    // Set motor current based on power and PAS multiplier.
+    // Sanity check the current to be between 0 and MAX_AMPS.
     // TODO: See if we need ramping here or if the running average
     // provides enough of a ramp.
-    VU.setCurrent(pas * power / VU.data.inpVoltage);
+
+    Serial.print("Calculated motor power ");
+    Serial.println(pas * power);
+    current = pas * power / VU.data.inpVoltage;
+    if (current < 0)
+      current = 0;
+    else if (current > MAX_AMPS)
+      current = MAX_AMPS;
+
+    //VU.setCurrent(current);
     vesc_connected = true;
   }
   else
   {
     vesc_connected = false;
+  }
+}
+
+  // if the wheel timer has not been updated for 4 seconds, zero out the
+  // internal speed abd cadence values, so the power resets to zero.
+void zero_on_inactivity()
+{
+  if (currentMillis > time_prev_wheel + WHEEL_INACTIVITY_INTERVAL)
+  {
+    speed = 0;
+    power = 0;
+  }
+
+  // Similarly for the crank. Zero the filter out to provide a starting ramp
+  // when next started up.
+  if (currentMillis > time_prev_crank + CRANK_INACTIVITY_INTERVAL)
+  {
+    power = 0;
+    filter.fillValue(0, FILTER_SIZE);
   }
 }
 
@@ -332,9 +377,9 @@ void setup()
   BLE.addService(CyclePowerService);
 
   // Establish Babelfish motor measurement service and its characteristics
-
-
-
+  motorService.addCharacteristic(motorMeasurement);
+  motorService.addCharacteristic(motorSettings);
+  BLE.addService(motorService);
 
   // Don't advertise the battery service; it will be found when the app connects,
   // if the app is looking for it
@@ -342,13 +387,9 @@ void setup()
   BLE.addService(batteryService);
   batteryLevelChar.writeValue(BatteryPercent);
 
-  lastWheeltime = millis() << 1;
-  lastCranktime = millis();
-
   unsigned long t = millis();
   lastWheeltime = t << 1;       // this is in half-ms
   lastCranktime = t;
-  outputWheeltime = t;
   filter.fillValue(0, FILTER_SIZE);   // fill running average with zeroes
 
   // Write the initial values of the CP (power) characteristics
@@ -360,10 +401,13 @@ void setup()
   CyclePowerFeature.writeValue(fBuffer, 4);
   CyclePowerSensorLocation.writeValue(slBuffer, 1);
   fillCP();
+  fillMS();
 
   // Attach the wheel and crank interrupt routines to their input pins
-  attachInterrupt(digitalPinToInterrupt(WHEEL_PIN), wheelAdd, FALLING);
-  attachInterrupt(digitalPinToInterrupt(CRANK_PIN), crankAdd, FALLING);
+  // DONT DO THIS as the interrupts are really dodgy on the Nano 33BLE.
+  // We will poll them instead.
+  //attachInterrupt(digitalPinToInterrupt(WHEEL_PIN), wheelAdd, FALLING);
+  //attachInterrupt(digitalPinToInterrupt(CRANK_PIN), crankAdd, FALLING);
 
   // Advertise that we are ready to go
   BLE.advertise();
@@ -388,7 +432,7 @@ void loop()
     {
       connected = 1;
       currentMillis = millis();
-
+      poll_wheel_crank_pins();
 
       // Check and report the wheel and crank measurements every REPORTING_INTERVAL ms
       if (oldWheelRev < wheelRev && currentMillis - oldWheelMillis >= REPORTING_INTERVAL)
@@ -407,29 +451,16 @@ void loop()
         update_chars(0, "timer");
       }
       
-      if (currentMillis - previousMillis >= POWER_CALC_INTERVAL)
+      if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
       {
-        // Calculate power from average torque and cadence. Multiply by the PAS level
-        // and send it down to the VESC
+        // Calculate human power from average torque and cadence. Multiply by the PAS level
+        // and send it down to the VESC as motor power
         updateVESC();
-        previousMillis = currentMillis;
+        previousPowerCalc = currentMillis;
       }
 
-      // if the wheel timer has not been updated for 4 seconds, zero out the
-      // internal speed, torque and cadence values, so the power resets to zero.
-      if (currentMillis > time_prev_wheel + WHEEL_INACTIVITY_INTERVAL)
-      {
-        speed = 0;
-        power = 0;
-      }
-
-      // Similarly for the crank. Zero the filter out to provide a starting ramp
-      // when next started up.
-      if (currentMillis > time_prev_crank + CRANK_INACTIVITY_INTERVAL)
-      {
-        power = 0;
-        filter.fillValue(0, FILTER_SIZE);
-      }
+      // Zero things if inactive
+      zero_on_inactivity();
     }
 
     // when the central disconnects, turn off the LED:
@@ -445,12 +476,30 @@ void loop()
     // No central is connected. We run with default parameters
     // (PAS level 2, 25km/h speed limit)
     currentMillis = millis();
-    if (currentMillis - previousMillis >= POWER_CALC_INTERVAL)
+    poll_wheel_crank_pins();
+
+    // For debugging
+    if (currentMillis - previousMillis >= REPORTING_INTERVAL)
+    {
+      // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
+      //wheelAdd();
+      //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
+
+      // For static calibration/debugging read torque outside of the cadence pulses
+      raw_torque = readTorque();
+
+      update_chars(0, "timer");
+    }
+
+    if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
     {
       // Calculate power from average torque and cadence. Multiply by the PAS level
       // and send it down to the VESC
       updateVESC();
-      previousMillis = currentMillis;
+      previousPowerCalc = currentMillis;
     }
+
+    // Zero things if inactive
+    zero_on_inactivity();
   }
 }

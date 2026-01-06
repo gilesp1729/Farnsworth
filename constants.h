@@ -1,14 +1,22 @@
-// Constants used by bicycle computer
+// Constants used by Farnsworth to interface to the VESC.
 
-
-// Pins for wheel and quadrature cadence sensors
+// Pins for wheel and cadence sensors
 #define WHEEL_PIN 10
 
 // SD pin from toque/cadence sensor (PAS1 and PAS2 are not used)
 #define CRANK_PIN 2
 
-// Torque sensor (analog)
+// Torque sensor (analog) pin.
 #define TORQUE_PIN A0
+
+// Torque sensor static torque (ADC count when no torque on pedal)
+// and torque slope (ADC counts per Nm) Determined by experiment
+// to reliably produce progressive torque values in Nm.
+#define STATIC_TORQUE 400
+#define TORQUE_SLOPE  6.8
+
+// Maxiumum amps sent to VESC. Should be <= the max current set in the VESC.
+#define MAX_AMPS      12
 
 // Cadence pulses per revolution of crank
 #define PULSES_PER_REV 32
@@ -22,8 +30,8 @@
 // Reporting interval in ms
 #define REPORTING_INTERVAL    500
 
-// Power calculation intrval in ms
-#define POWER_CALC_INTERVAL   50
+// Power calculation intrval in ms. Deliberately long for testing
+#define POWER_CALC_INTERVAL   100
 
 // Intervals (in ms) after which sensors are considered inactive
 #define WHEEL_INACTIVITY_INTERVAL   2000

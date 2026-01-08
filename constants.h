@@ -9,10 +9,8 @@
 // Torque sensor (analog) pin.
 #define TORQUE_PIN A0
 
-// Torque sensor static torque (ADC count when no torque on pedal)
-// and torque slope (ADC counts per Nm) Determined by experiment
+// Torque slope (ADC counts per Nm) Determined by experiment
 // to reliably produce progressive torque values in Nm.
-#define STATIC_TORQUE 400
 #define TORQUE_SLOPE  6.8
 
 // Maxiumum amps sent to VESC. Should be <= the max current set in the VESC.
@@ -30,7 +28,7 @@
 // Reporting interval in ms
 #define REPORTING_INTERVAL    500
 
-// Power calculation intrval in ms. Deliberately long for testing
+// Power calculation intrval in ms. 
 #define POWER_CALC_INTERVAL   100
 
 // Intervals (in ms) after which sensors are considered inactive
@@ -38,9 +36,10 @@
 #define CRANK_INACTIVITY_INTERVAL   500
 
 // Size of moving average filter for torque readings (they are read 
-// and averaged once per cadence pulse, ~30-180 ms) They need to be averaged
+// once per cadence pulse, ~30-180 ms) They need to be collected
 // over some part of a crank revolution, to smooth out dead spots and
-// to provide a starting ramp.
+// to provide a starting ramp. The maximum torque is taken for power
+// calculations.
 // 16 = half a crank revolution
 // 32 = a full revolution
 #define FILTER_SIZE 16

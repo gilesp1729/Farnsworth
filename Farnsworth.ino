@@ -47,6 +47,9 @@ unsigned short feature_bits = 0x0C;
 // Flags bits: bit 4 - wheel pair present, bit 5 - crank pair present
 unsigned short flags = 0x30;
 
+// Torque sensor reading with no force on pedal
+float static_torque;
+
 // Moving average filter for torque readings
 RunningAverage filter(FILTER_SIZE);
 
@@ -137,8 +140,9 @@ void fillMS()
   uint16_t range100 = 0;  // TODO Calculate this somehow
   uint16_t kmh100 = speed * 360;   // m/s to km/h*100
 
-  if (!vesc_connected)   // We must have seen the VESC to get this data
-    return;
+  // need to write it anyway so phone app doesn't crash on zero length chars
+  //if (!vesc_connected)   // We must have seen the VESC to get this data
+  //  return;
 
   int n = 0;  // to facilitate adding and removing stuff
   bleBuffer[n++] = kmh100 & 0xff;		                // speed in km/h*100
@@ -162,6 +166,9 @@ void fillMS()
   bleBuffer[n++] = (speed_limit >> 8) & 0xff;
   bleBuffer[n++] = circ & 0xff;		                  // wheel circumference in mm
   bleBuffer[n++] = (circ >> 8) & 0xff;
+  bleBuffer[n++] = 0;
+  bleBuffer[n++] = 0;
+  bleBuffer[n++] = 0;
   motorSettings.writeValue(bleBuffer, n);
 }
 
@@ -211,7 +218,7 @@ void wheelAdd()
   if (time_now_wheel > time_prev_wheel + time_chat_wheel)
   {
     // Calculate the speed in m/s based on wheel circumference
-    speed = (circ * 1000) / (time_now_wheel - time_prev_wheel);
+    speed = circ / (time_now_wheel - time_prev_wheel);
 
     // Update the wheel counter and remember the time of last update
     wheelRev = wheelRev + 1;
@@ -220,16 +227,14 @@ void wheelAdd()
   }
 }
 
-// Take a torque sensor reading and convert it to an instananeous torque in Nm  // TODO what units?
+// Take a torque sensor reading and convert it to an instananeous torque in Nm 
 float readTorque()
 {
   float read_torque = analogRead(TORQUE_PIN);   
 
-  // TODO calibrate this properly. Standing voltage on torque pin with no torque is about 0.4V (after 3/5 v-divider)
-  // and we're told it is 35mV/Nm thereafter. Believe when see.
-  Serial.print("Torque ADC: ");
-  Serial.println(read_torque);
-  read_torque = (read_torque - STATIC_TORQUE) / TORQUE_SLOPE;
+  //Serial.print("Torque ADC: ");
+  //Serial.println(read_torque);
+  read_torque = (read_torque - static_torque) / TORQUE_SLOPE;
   if (read_torque < 0)
     read_torque = 0;
   return read_torque;
@@ -241,7 +246,7 @@ void crankAdd()
   time_now_crank = millis();
   if (time_now_crank > time_prev_crank + time_chat_crank) 
   {
-    // Read the torque every cadence pulse and add it in to the running average.
+    // Read the torque every cadence pulse and add it in to the running average buffer.
     raw_torque = readTorque();
     filter.addValue(raw_torque);
 
@@ -271,25 +276,24 @@ void poll_wheel_crank_pins()
     wheelAdd();
   state_prev_wheel = state_now_wheel;
   
-
   state_now_crank = digitalRead(CRANK_PIN);
   if (state_now_crank < state_prev_crank)
     crankAdd();
   state_prev_crank = state_now_crank;
 }
 
-// Calculate power from average torque and cadence. Multiply by the PAS level
+// Calculate power from peak torque and cadence. Multiply by the PAS level
 // and send it down to the VESC as a motor current setting.
 void updateVESC()
 {
-  torque = filter.getAverage();
+  torque = filter.getMaxInBuffer();
   power = torque * crpm * (TWO_PI / 60);   // the human average power in watts
 
   // Get VESC stats
   if ( VU.getVescValues() )
   {
     float current;
-
+#if 0
     Serial.print("RPM ");
     Serial.print(VU.data.rpm / NUM_POLE_PAIRS);
     Serial.print(" Volts ");
@@ -303,21 +307,22 @@ void updateVESC()
     Serial.print(" Motor temp ");
     Serial.print(VU.data.tempMotor);
     Serial.println();
-
+#endif
     // Set motor current based on power and PAS multiplier.
     // Sanity check the current to be between 0 and MAX_AMPS.
     // TODO: See if we need ramping here or if the running average
     // provides enough of a ramp.
-
+#if 0
     Serial.print("Calculated motor power ");
     Serial.println(pas * power);
+#endif
     current = pas * power / VU.data.inpVoltage;
     if (current < 0)
       current = 0;
     else if (current > MAX_AMPS)
       current = MAX_AMPS;
 
-    //VU.setCurrent(current);
+    VU.setCurrent(current);
     vesc_connected = true;
   }
   else
@@ -340,8 +345,9 @@ void zero_on_inactivity()
   // when next started up.
   if (currentMillis > time_prev_crank + CRANK_INACTIVITY_INTERVAL)
   {
+    crpm = 0;
     power = 0;
-    filter.fillValue(0, FILTER_SIZE);
+    filter.fillValue(0, FILTER_SIZE);   // TODO only do this when we've been waiting a longer time?
   }
 }
 
@@ -408,6 +414,11 @@ void setup()
   // We will poll them instead.
   //attachInterrupt(digitalPinToInterrupt(WHEEL_PIN), wheelAdd, FALLING);
   //attachInterrupt(digitalPinToInterrupt(CRANK_PIN), crankAdd, FALLING);
+
+  // Read the torque sensor ADC with no force on pedal.
+  static_torque = analogRead(TORQUE_PIN);   
+  Serial.print("Initial static torque ADC: ");
+  Serial.println(static_torque);
 
   // Advertise that we are ready to go
   BLE.advertise();
@@ -484,9 +495,6 @@ void loop()
       // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
       //wheelAdd();
       //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
-
-      // For static calibration/debugging read torque outside of the cadence pulses
-      raw_torque = readTorque();
 
       update_chars(0, "timer");
     }

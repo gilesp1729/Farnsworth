@@ -20,7 +20,7 @@
 #define PULSES_PER_REV 32
 
 // Number of pole-pairs in the motor (only used for debugging prints)
-#define NUM_POLE_PAIRS  8
+#define NUM_POLE_PAIRS  5
 
 // Number of nom. 3.7V Li cells in series in the battery pack
 #define NUM_SERIES_CELLS  13

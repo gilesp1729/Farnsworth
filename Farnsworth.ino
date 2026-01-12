@@ -78,13 +78,14 @@ volatile unsigned long lastWheeltime = 0;   // last time measurement taken
 // Note: the wheel time is in half-ms (1/2048 sec), unlike CSC where it is in ms
 volatile float raw_torque = 0;              // torque in Nm read from sensor
 volatile float torque = 0;                  // averaged torque in Nm
-volatile float speed = 0;                   // calculated speed in metres/sec
+volatile float speed = 0;                   // calculated speed in km/h
 volatile float crpm = 0;                    // calculated crank rpm
 short power = 0;                            // human power in watts
+float req_amps;                             // requested amps sent to VESC
 
 // Wheel circumference and initial speed limit for motor
-unsigned long circ = 2300;
-unsigned long speed_limit = 25;
+unsigned long circ = 2300;            // mm
+unsigned long speed_limit = 2500;     // km/h*100
 
 // PAS level for motor (1 = eco, 2 = tour, 3 = sport, etc.)
 int pas = 2;
@@ -137,8 +138,8 @@ void fillMS()
   // Some integer values needed for the Babelfish protocol
   uint16_t volts100 = VU.data.inpVoltage * 100;
   uint16_t amps100 = VU.data.avgInputCurrent * 100;
-  uint16_t range100 = 0;  // TODO Calculate this somehow
-  uint16_t kmh100 = speed * 360;   // m/s to km/h*100
+  uint16_t req_amps100 = req_amps * 100;
+  uint16_t kmh100 = speed * 100;
 
   // need to write it anyway so phone app doesn't crash on zero length chars
   //if (!vesc_connected)   // We must have seen the VESC to get this data
@@ -154,8 +155,8 @@ void fillMS()
   bleBuffer[n++] = (volts100 >> 8) & 0xff;	   
   bleBuffer[n++] = amps100 & 0xff;		              // motor current in amps*100
   bleBuffer[n++] = (amps100 >> 8) & 0xff;	   
-  bleBuffer[n++] = range100 & 0xff;		              // range in km*100  
-  bleBuffer[n++] = (range100 >> 8) & 0xff;				      
+  bleBuffer[n++] = req_amps100 & 0xff;		          // requested motor current in amps*100
+  bleBuffer[n++] = (req_amps100 >> 8) & 0xff;				      
   bleBuffer[n++] = pas;			                        // PAS level (0-5)	TODO: Make this writable
   bleBuffer[n++] = (uint8_t)(VU.data.tempMotor + 40);		// Motor temp in degC + 40			      
   bleBuffer[n++] = (uint8_t)(VU.data.tempMosfet + 40);	// Controller temp in degC + 40		      
@@ -217,8 +218,8 @@ void wheelAdd()
   time_now_wheel = millis();
   if (time_now_wheel > time_prev_wheel + time_chat_wheel)
   {
-    // Calculate the speed in m/s based on wheel circumference
-    speed = circ / (time_now_wheel - time_prev_wheel);
+    // Calculate the speed in km/h based on wheel circumference
+    speed = (circ * 3.6) / (time_now_wheel - time_prev_wheel);
 
     // Update the wheel counter and remember the time of last update
     wheelRev = wheelRev + 1;
@@ -232,8 +233,6 @@ float readTorque()
 {
   float read_torque = analogRead(TORQUE_PIN);   
 
-  //Serial.print("Torque ADC: ");
-  //Serial.println(read_torque);
   read_torque = (read_torque - static_torque) / TORQUE_SLOPE;
   if (read_torque < 0)
     read_torque = 0;
@@ -292,7 +291,6 @@ void updateVESC()
   // Get VESC stats
   if ( VU.getVescValues() )
   {
-    float current;
 #if 0
     Serial.print("RPM ");
     Serial.print(VU.data.rpm / NUM_POLE_PAIRS);
@@ -310,19 +308,17 @@ void updateVESC()
 #endif
     // Set motor current based on power and PAS multiplier.
     // Sanity check the current to be between 0 and MAX_AMPS.
-    // TODO: See if we need ramping here or if the running average
-    // provides enough of a ramp.
 #if 0
     Serial.print("Calculated motor power ");
     Serial.println(pas * power);
 #endif
-    current = pas * power / VU.data.inpVoltage;
-    if (current < 0)
-      current = 0;
-    else if (current > MAX_AMPS)
-      current = MAX_AMPS;
+    req_amps = pas * power / VU.data.inpVoltage;
+    if (req_amps < 0)
+      req_amps = 0;
+    else if (req_amps > MAX_AMPS)
+      req_amps = MAX_AMPS;
 
-    VU.setCurrent(current);
+    VU.setCurrent(req_amps);
     vesc_connected = true;
   }
   else
@@ -396,7 +392,7 @@ void setup()
   unsigned long t = millis();
   lastWheeltime = t << 1;       // this is in half-ms
   lastCranktime = t;
-  filter.fillValue(0, FILTER_SIZE);   // fill running average with zeroes
+  filter.fillValue(0, FILTER_SIZE);   // fill running average buffer with zeroes
 
   // Write the initial values of the CP (power) characteristics
   slBuffer[0] = sensor_pos & 0xff;
@@ -457,7 +453,7 @@ void loop()
       else if (currentMillis - previousMillis >= REPORTING_INTERVAL)
       {
         // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
-        //wheelAdd();
+        wheelAdd();
         //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
         update_chars(0, "timer");
       }
@@ -489,6 +485,7 @@ void loop()
     currentMillis = millis();
     poll_wheel_crank_pins();
 
+#if 0
     // For debugging
     if (currentMillis - previousMillis >= REPORTING_INTERVAL)
     {
@@ -498,7 +495,7 @@ void loop()
 
       update_chars(0, "timer");
     }
-
+#endif
     if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
     {
       // Calculate power from average torque and cadence. Multiply by the PAS level

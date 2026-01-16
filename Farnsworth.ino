@@ -67,8 +67,12 @@ volatile unsigned long time_prev_wheel = 0, time_now_wheel;
 volatile unsigned long time_prev_crank = 0, time_now_crank;
 volatile unsigned long time_chat_wheel = 100;  // dead zone for bounces
 volatile unsigned long time_chat_crank = 10;  // dead zone for bounces (crank)
+
+// Counters for noise filtering on pins
 int state_prev_wheel = 1;
 int state_prev_crank = 1;
+unsigned long state_counter_wheel = 0;
+unsigned long state_counter_crank = 0;
 
 // Counters for updating power and speed services
 volatile unsigned long wheelRev = 0;
@@ -89,6 +93,10 @@ unsigned long speed_limit = 2500;     // km/h*100
 
 // PAS level for motor (1 = eco, 2 = tour, 3 = sport, etc.)
 int pas = 2;
+
+// PAS level multipliers for 5 PAS levels. 
+// These come from Bosch (Bafang don't publish theirs)
+float pas_mult[6] = { 0, 0.6, 1.4, 2.4, 3.4, 4.0};
 
 volatile unsigned int crankPulses = 0;
 volatile unsigned int crankRev = 0;
@@ -149,8 +157,8 @@ void fillMS()
   bleBuffer[n++] = kmh100 & 0xff;		                // speed in km/h*100
   bleBuffer[n++] = (kmh100 >> 8) & 0xff;	   
   bleBuffer[n++] = crpm;			                      // cadence in rpm
-  bleBuffer[n++] = (power * pas) & 0xff;		        // motor power in watts = human power * PAS level (0-5)
-  bleBuffer[n++] = ((power * pas) >> 8) & 0xff;	   
+  bleBuffer[n++] = (int)(power * pas_mult[pas]) & 0xff;		        // motor power in watts = human power * PAS multiplier
+  bleBuffer[n++] = ((int)(power * pas_mult[pas]) >> 8) & 0xff;	   
   bleBuffer[n++] = volts100 & 0xff;		              // battery volts*100
   bleBuffer[n++] = (volts100 >> 8) & 0xff;	   
   bleBuffer[n++] = amps100 & 0xff;		              // motor current in amps*100
@@ -264,7 +272,7 @@ void crankAdd()
   }
 }
 
-// Poll the pins.
+// Poll the pins simple version.
 void poll_wheel_crank_pins()
 {
   int state_now_wheel, state_now_crank;
@@ -281,7 +289,43 @@ void poll_wheel_crank_pins()
   state_prev_crank = state_now_crank;
 }
 
-// Calculate power from peak torque and cadence. Multiply by the PAS level
+#if 0 // further testing reqd
+// Poll a pin.
+// Assuming most noise is in the high state, pick up a falling edge followed by
+// a certain time (3-5ms?) of steady low.
+int poll_pin(int pin, int *state_prev, unsigned long *counter, int ms)
+{
+  int state_now = digitalRead(pin);
+  int rc = 0;
+
+  // Detect a falling edge of the pin and start the count.
+  if (state_now < *state_prev)
+  {
+    *counter = currentMillis;
+  }
+  else if (state_now == 0 && *state_prev == 0 && *counter > 0)
+  {
+    // Still counting. If we have reached the ms limit, signal this
+    // by returning true.
+    if (currentMillis - *counter > ms)
+    {
+      rc = 1;
+      *counter = 0;
+    }
+  }
+  else if (state_now == 1)
+  {
+    // Pin has gone high. Cancel any counter in effect.
+    *counter = 0;
+  }
+
+  *state_prev = state_now;
+  return rc;
+}
+#endif // 0 
+
+
+// Calculate power from peak torque and cadence. Multiply by the PAS multiplier
 // and send it down to the VESC as a motor current setting.
 void updateVESC()
 {
@@ -308,11 +352,7 @@ void updateVESC()
 #endif
     // Set motor current based on power and PAS multiplier.
     // Sanity check the current to be between 0 and MAX_AMPS.
-#if 0
-    Serial.print("Calculated motor power ");
-    Serial.println(pas * power);
-#endif
-    req_amps = pas * power / VU.data.inpVoltage;
+    req_amps = pas_mult[pas] * power / VU.data.inpVoltage;
     if (req_amps < 0)
       req_amps = 0;
     else if (req_amps > MAX_AMPS)
@@ -343,7 +383,7 @@ void zero_on_inactivity()
   {
     crpm = 0;
     power = 0;
-    filter.fillValue(0, FILTER_SIZE);   // TODO only do this when we've been waiting a longer time?
+    filter.fillValue(0, FILTER_SIZE);  
   }
 }
 
@@ -440,6 +480,12 @@ void loop()
       connected = 1;
       currentMillis = millis();
       poll_wheel_crank_pins();
+#if 0      
+      if (poll_pin(WHEEL_PIN, &state_prev_wheel, &state_counter_wheel, 5))
+        wheelAdd();
+      if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
+        crankAdd();
+#endif
 
       // Check and report the wheel and crank measurements every REPORTING_INTERVAL ms
       if (oldWheelRev < wheelRev && currentMillis - oldWheelMillis >= REPORTING_INTERVAL)
@@ -453,7 +499,7 @@ void loop()
       else if (currentMillis - previousMillis >= REPORTING_INTERVAL)
       {
         // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
-        wheelAdd();
+        //wheelAdd();
         //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
         update_chars(0, "timer");
       }
@@ -484,6 +530,12 @@ void loop()
     // (PAS level 2, 25km/h speed limit)
     currentMillis = millis();
     poll_wheel_crank_pins();
+#if 0    
+    if (poll_pin(WHEEL_PIN, &state_prev_wheel, &state_counter_wheel, 5))
+      wheelAdd();
+    if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
+      crankAdd();
+#endif
 
 #if 0
     // For debugging
@@ -498,7 +550,7 @@ void loop()
 #endif
     if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
     {
-      // Calculate power from average torque and cadence. Multiply by the PAS level
+      // Calculate power from average torque and cadence. Multiply by the PAS multiplier
       // and send it down to the VESC
       updateVESC();
       previousPowerCalc = currentMillis;

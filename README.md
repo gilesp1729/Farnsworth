@@ -6,7 +6,7 @@ This version is for Bafang M510 and other mid motors that have an analog torque 
 
 ### Scope
 
-To allow gutted (motor only) Bafang mid motors to be controlled by an externally mounted VESC, and allow users to have full control. It addionally outputs speed, cadence and power data via the BLE Cycle Power service to popular cycling apps (such as SuperCycle), or full motor parameters to the [Babelfish app for VESC]([GitHub - gilesp1729/Babelfish: Android app for bike computer supporting CSC, CP and Babelfish protocol over BLE.](https://github.com/gilesp1729/Babelfish)).
+To allow gutted (motor only) Bafang mid motors to be controlled by an externally mounted VESC, and allow users to have full control. It addionally outputs speed, cadence and power data via the BLE Cycle Power service to popular cycling apps (such as SuperCycle), or full motor parameters to the [Babelfish app for VESC](https://github.com/gilesp1729/Babelfish).
 
 ### Sensors used
 

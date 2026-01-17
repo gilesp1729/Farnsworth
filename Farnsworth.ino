@@ -31,6 +31,7 @@ int BatteryPercent = 100;  // start with 100% full
 BLEService motorService("FFF0");
 BLECharacteristic motorMeasurement("FFF1", BLERead | BLENotify, 14);
 BLECharacteristic motorSettings("FFF2", BLERead | BLENotify, 7);
+BLECharacteristic motorNewSettings("FFF3", BLEWrite, 7);
 
 int sensor_pos = 11;      // sensor position magic number.
 // No idea what they mean (shitty specs) but it's mandatory to supply one.
@@ -66,7 +67,7 @@ volatile unsigned long currentMillis = 0;
 volatile unsigned long time_prev_wheel = 0, time_now_wheel;
 volatile unsigned long time_prev_crank = 0, time_now_crank;
 volatile unsigned long time_chat_wheel = 100;  // dead zone for bounces
-volatile unsigned long time_chat_crank = 10;  // dead zone for bounces (crank)
+volatile unsigned long time_chat_crank = 15;  // dead zone for bounces (crank)
 
 // Counters for noise filtering on pins
 int state_prev_wheel = 1;
@@ -149,10 +150,6 @@ void fillMS()
   uint16_t req_amps100 = req_amps * 100;
   uint16_t kmh100 = speed * 100;
 
-  // need to write it anyway so phone app doesn't crash on zero length chars
-  //if (!vesc_connected)   // We must have seen the VESC to get this data
-  //  return;
-
   int n = 0;  // to facilitate adding and removing stuff
   bleBuffer[n++] = kmh100 & 0xff;		                // speed in km/h*100
   bleBuffer[n++] = (kmh100 >> 8) & 0xff;	   
@@ -165,7 +162,7 @@ void fillMS()
   bleBuffer[n++] = (amps100 >> 8) & 0xff;	   
   bleBuffer[n++] = req_amps100 & 0xff;		          // requested motor current in amps*100
   bleBuffer[n++] = (req_amps100 >> 8) & 0xff;				      
-  bleBuffer[n++] = pas;			                        // PAS level (0-5)	TODO: Make this writable
+  bleBuffer[n++] = pas;			                          // Unused (PAS left here for backward compatibility)
   bleBuffer[n++] = (uint8_t)(VU.data.tempMotor + 40);		// Motor temp in degC + 40			      
   bleBuffer[n++] = (uint8_t)(VU.data.tempMosfet + 40);	// Controller temp in degC + 40		      
   motorMeasurement.writeValue(bleBuffer, n);				      
@@ -175,13 +172,20 @@ void fillMS()
   bleBuffer[n++] = (speed_limit >> 8) & 0xff;
   bleBuffer[n++] = circ & 0xff;		                  // wheel circumference in mm
   bleBuffer[n++] = (circ >> 8) & 0xff;
-  bleBuffer[n++] = 0;
+  bleBuffer[n++] = pas;                             // PAS level (0-5)
   bleBuffer[n++] = 0;
   bleBuffer[n++] = 0;
   motorSettings.writeValue(bleBuffer, n);
 }
 
-
+// Check if writable characteristics have changed from the central.
+void check_writable_chars()
+{
+  motorNewSettings.readValue(bleBuffer, 7);
+  speed_limit = bleBuffer[0] + ((uint16_t)bleBuffer[1] << 8);
+  circ = bleBuffer[2] + ((uint16_t)bleBuffer[3] << 8);
+  pas = bleBuffer[4];
+}
 
 // Update old values and send CP and CSC to BLE client
 void update_chars(bool calc_power, String sType)
@@ -421,6 +425,7 @@ void setup()
   // Establish Babelfish motor measurement service and its characteristics
   motorService.addCharacteristic(motorMeasurement);
   motorService.addCharacteristic(motorSettings);
+  motorService.addCharacteristic(motorNewSettings);
   BLE.addService(motorService);
 
   // Don't advertise the battery service; it will be found when the app connects,
@@ -486,6 +491,9 @@ void loop()
       if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
         crankAdd();
 #endif
+      // Check if connected central has updated the writable settings
+      // (PAS, speed limit, wheel circ)
+      check_writable_chars();
 
       // Check and report the wheel and crank measurements every REPORTING_INTERVAL ms
       if (oldWheelRev < wheelRev && currentMillis - oldWheelMillis >= REPORTING_INTERVAL)

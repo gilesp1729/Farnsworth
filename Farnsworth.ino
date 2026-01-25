@@ -67,13 +67,14 @@ volatile unsigned long currentMillis = 0;
 volatile unsigned long time_prev_wheel = 0, time_now_wheel;
 volatile unsigned long time_prev_crank = 0, time_now_crank;
 volatile unsigned long time_chat_wheel = 100;  // dead zone for bounces
-volatile unsigned long time_chat_crank = 15;  // dead zone for bounces (crank)
+volatile unsigned long time_chat_crank = 18;  // dead zone for bounces (crank)
 
 // Counters for noise filtering on pins
 int state_prev_wheel = 1;
 int state_prev_crank = 1;
 unsigned long state_counter_wheel = 0;
 unsigned long state_counter_crank = 0;
+unsigned long loop_counter = 0;   // for debugging how many loops per reporting interval
 
 // Counters for updating power and speed services
 volatile unsigned long wheelRev = 0;
@@ -92,12 +93,14 @@ float req_amps;                             // requested amps sent to VESC
 unsigned long circ = 2300;            // mm
 unsigned long speed_limit = 2500;     // km/h*100
 
+// Ramp down speed from speed_limit to speed_lnmit + speed_ramp
+float speed_ramp = 4.0;
+
 // PAS level for motor (1 = eco, 2 = tour, 3 = sport, etc.)
 int pas = 2;
 
 // PAS level multipliers for 5 PAS levels. 
-// These come from Bosch (Bafang don't publish theirs)
-float pas_mult[6] = { 0, 0.6, 1.4, 2.4, 3.4, 4.0};
+float pas_mult[6] = { 0, 1.0, 1.8, 2.6, 3.4, 4.2};
 
 volatile unsigned int crankPulses = 0;
 volatile unsigned int crankRev = 0;
@@ -187,9 +190,40 @@ void check_writable_chars()
   pas = bleBuffer[4];
 }
 
+// Get VESC stats
+// This is very slow (100ms!) esp when no VESC is connected, so don't do it 
+// very often.
+void queryVESC()
+{
+  if ( VU.getVescValues() ) 
+  {
+    vesc_connected = true;
+  #if 0
+    Serial.print("RPM ");
+    Serial.print(VU.data.rpm / NUM_POLE_PAIRS);
+    Serial.print(" Volts ");
+    Serial.print(VU.data.inpVoltage);
+    Serial.print(" Amps ");
+    Serial.print(VU.data.avgInputCurrent);
+    Serial.print(" Duty ");
+    Serial.print(VU.data.dutyCycleNow);
+    Serial.print(" Ctrl temp ");
+    Serial.print(VU.data.tempMosfet);
+    Serial.print(" Motor temp ");
+    Serial.print(VU.data.tempMotor);
+    Serial.println();
+#endif
+  }
+  else
+  {
+    vesc_connected = false;
+  }
+}
+
 // Update old values and send CP and CSC to BLE client
 void update_chars(bool calc_power, String sType)
 {
+  queryVESC();
 
   // Update old values and send CP
   oldWheelRev = wheelRev;
@@ -276,6 +310,9 @@ void crankAdd()
   }
 }
 
+#define SIMPLE_POLL
+#ifdef SIMPLE_POLL
+
 // Poll the pins simple version.
 void poll_wheel_crank_pins()
 {
@@ -293,10 +330,15 @@ void poll_wheel_crank_pins()
   state_prev_crank = state_now_crank;
 }
 
-#if 0 // further testing reqd
+#else
+
 // Poll a pin.
-// Assuming most noise is in the high state, pick up a falling edge followed by
-// a certain time (3-5ms?) of steady low.
+// Pick up a falling edge followed by a certain time (ms) of steady low.
+// TODO: Also count the high before the falling edge.
+
+// The loops come around every 80-100us (~6000 loops per reporting interval)
+// except when UpdateVESC is called, then it's a lot slower.
+
 int poll_pin(int pin, int *state_prev, unsigned long *counter, int ms)
 {
   int state_now = digitalRead(pin);
@@ -326,7 +368,7 @@ int poll_pin(int pin, int *state_prev, unsigned long *counter, int ms)
   *state_prev = state_now;
   return rc;
 }
-#endif // 0 
+#endif // SIMPLE_POLL
 
 
 // Calculate power from peak torque and cadence. Multiply by the PAS multiplier
@@ -336,25 +378,10 @@ void updateVESC()
   torque = filter.getMaxInBuffer();
   power = torque * crpm * (TWO_PI / 60);   // the human average power in watts
 
-  // Get VESC stats
-  if ( VU.getVescValues() )
+  if (vesc_connected)
   {
-#if 0
-    Serial.print("RPM ");
-    Serial.print(VU.data.rpm / NUM_POLE_PAIRS);
-    Serial.print(" Volts ");
-    Serial.print(VU.data.inpVoltage);
-    Serial.print(" Amps ");
-    Serial.print(VU.data.avgInputCurrent);
-    Serial.print(" Duty ");
-    Serial.print(VU.data.dutyCycleNow);
-    Serial.print(" Ctrl temp ");
-    Serial.print(VU.data.tempMosfet);
-    Serial.print(" Motor temp ");
-    Serial.print(VU.data.tempMotor);
-    Serial.println();
-#endif
     // Set motor current based on power and PAS multiplier.
+    
     // Sanity check the current to be between 0 and MAX_AMPS.
     req_amps = pas_mult[pas] * power / VU.data.inpVoltage;
     if (req_amps < 0)
@@ -362,12 +389,15 @@ void updateVESC()
     else if (req_amps > MAX_AMPS)
       req_amps = MAX_AMPS;
 
+    // If speed limit has been exceeded, ramp down the current
+    // and finally cut it off altogether.
+    float lim = speed_limit / 100.0;
+    if (speed > lim + speed_ramp)
+      req_amps = 0;
+    else if (speed > lim)
+      req_amps *= 1.0 - ((speed - lim) / speed_ramp);
+
     VU.setCurrent(req_amps);
-    vesc_connected = true;
-  }
-  else
-  {
-    vesc_connected = false;
   }
 }
 
@@ -484,18 +514,21 @@ void loop()
     {
       connected = 1;
       currentMillis = millis();
+#ifdef SIMPLE_POLL      
       poll_wheel_crank_pins();
-#if 0      
+#else
       if (poll_pin(WHEEL_PIN, &state_prev_wheel, &state_counter_wheel, 5))
         wheelAdd();
       if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
         crankAdd();
 #endif
+
       // Check if connected central has updated the writable settings
       // (PAS, speed limit, wheel circ)
       check_writable_chars();
 
       // Check and report the wheel and crank measurements every REPORTING_INTERVAL ms
+      //loop_counter++;
       if (oldWheelRev < wheelRev && currentMillis - oldWheelMillis >= REPORTING_INTERVAL)
       {
         update_chars(1, "wheel");
@@ -510,6 +543,9 @@ void loop()
         //wheelAdd();
         //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
         update_chars(0, "timer");
+        //Serial.print("Loop counter: ");
+        //Serial.println(loop_counter);
+        //loop_counter = 0;
       }
       
       if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
@@ -537,25 +573,34 @@ void loop()
     // No central is connected. We run with default parameters
     // (PAS level 2, 25km/h speed limit)
     currentMillis = millis();
+#ifdef SIMPLE_POLL
     poll_wheel_crank_pins();
-#if 0    
+#else    
     if (poll_pin(WHEEL_PIN, &state_prev_wheel, &state_counter_wheel, 5))
       wheelAdd();
     if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
       crankAdd();
 #endif
 
-#if 0
     // For debugging
+    //loop_counter++;
     if (currentMillis - previousMillis >= REPORTING_INTERVAL)
     {
+      queryVESC();
+#if 0
       // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
       //wheelAdd();
       //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
 
       update_chars(0, "timer");
-    }
+#else
+      queryVESC();      
 #endif
+      //Serial.print("Loop counter: ");
+      //Serial.println(loop_counter);
+      //loop_counter = 0;
+    }
+
     if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
     {
       // Calculate power from average torque and cadence. Multiply by the PAS multiplier

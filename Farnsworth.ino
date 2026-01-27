@@ -9,6 +9,7 @@
 // Controls VESC and reports via BLE using CP and Babelfish protocol.
 
 #include "constants.h"
+#include "poller.h"
 
 /** Initiate VescUart class */
 VescUart VU;
@@ -54,6 +55,10 @@ float static_torque;
 // Moving average filter for torque readings
 RunningAverage filter(FILTER_SIZE);
 
+// Poller for the wheel and crank pins
+Poller Wheel(WHEEL_PIN);
+Poller Crank(CRANK_PIN);
+
 // Access to the flash (non-volatile) memory
 //NanoBLEFlashPrefs flash;
 
@@ -68,13 +73,6 @@ volatile unsigned long time_prev_wheel = 0, time_now_wheel;
 volatile unsigned long time_prev_crank = 0, time_now_crank;
 volatile unsigned long time_chat_wheel = 100;  // dead zone for bounces
 volatile unsigned long time_chat_crank = 18;  // dead zone for bounces (crank)
-
-// Counters for noise filtering on pins
-int state_prev_wheel = 1;
-int state_prev_crank = 1;
-unsigned long state_counter_wheel = 0;
-unsigned long state_counter_crank = 0;
-unsigned long loop_counter = 0;   // for debugging how many loops per reporting interval
 
 // Counters for updating power and speed services
 volatile unsigned long wheelRev = 0;
@@ -310,66 +308,6 @@ void crankAdd()
   }
 }
 
-#define SIMPLE_POLL
-#ifdef SIMPLE_POLL
-
-// Poll the pins simple version.
-void poll_wheel_crank_pins()
-{
-  int state_now_wheel, state_now_crank;
-
-  // Detect a falling edge of the pin
-  state_now_wheel = digitalRead(WHEEL_PIN);
-  if (state_now_wheel < state_prev_wheel)
-    wheelAdd();
-  state_prev_wheel = state_now_wheel;
-  
-  state_now_crank = digitalRead(CRANK_PIN);
-  if (state_now_crank < state_prev_crank)
-    crankAdd();
-  state_prev_crank = state_now_crank;
-}
-
-#else
-
-// Poll a pin.
-// Pick up a falling edge followed by a certain time (ms) of steady low.
-// TODO: Also count the high before the falling edge.
-
-// The loops come around every 80-100us (~6000 loops per reporting interval)
-// except when UpdateVESC is called, then it's a lot slower.
-
-int poll_pin(int pin, int *state_prev, unsigned long *counter, int ms)
-{
-  int state_now = digitalRead(pin);
-  int rc = 0;
-
-  // Detect a falling edge of the pin and start the count.
-  if (state_now < *state_prev)
-  {
-    *counter = currentMillis;
-  }
-  else if (state_now == 0 && *state_prev == 0 && *counter > 0)
-  {
-    // Still counting. If we have reached the ms limit, signal this
-    // by returning true.
-    if (currentMillis - *counter > ms)
-    {
-      rc = 1;
-      *counter = 0;
-    }
-  }
-  else if (state_now == 1)
-  {
-    // Pin has gone high. Cancel any counter in effect.
-    *counter = 0;
-  }
-
-  *state_prev = state_now;
-  return rc;
-}
-#endif // SIMPLE_POLL
-
 
 // Calculate power from peak torque and cadence. Multiply by the PAS multiplier
 // and send it down to the VESC as a motor current setting.
@@ -409,6 +347,7 @@ void zero_on_inactivity()
   {
     speed = 0;
     power = 0;
+    Wheel.clear();
   }
 
   // Similarly for the crank. Zero the filter out to provide a starting ramp
@@ -418,6 +357,7 @@ void zero_on_inactivity()
     crpm = 0;
     power = 0;
     filter.fillValue(0, FILTER_SIZE);  
+    Crank.clear();
   }
 }
 
@@ -467,7 +407,9 @@ void setup()
   unsigned long t = millis();
   lastWheeltime = t << 1;       // this is in half-ms
   lastCranktime = t;
-  filter.fillValue(0, FILTER_SIZE);   // fill running average buffer with zeroes
+  filter.fillValue(0, FILTER_SIZE);   // fill torque running average buffer with zeroes
+  Wheel.clear();
+  Crank.clear();              // initialise running sum buffers
 
   // Write the initial values of the CP (power) characteristics
   slBuffer[0] = sensor_pos & 0xff;
@@ -514,21 +456,14 @@ void loop()
     {
       connected = 1;
       currentMillis = millis();
-#ifdef SIMPLE_POLL      
-      poll_wheel_crank_pins();
-#else
-      if (poll_pin(WHEEL_PIN, &state_prev_wheel, &state_counter_wheel, 5))
-        wheelAdd();
-      if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
-        crankAdd();
-#endif
+      Wheel.poll_pin(wheelAdd);
+      Crank.poll_pin(crankAdd);
 
       // Check if connected central has updated the writable settings
       // (PAS, speed limit, wheel circ)
       check_writable_chars();
 
       // Check and report the wheel and crank measurements every REPORTING_INTERVAL ms
-      //loop_counter++;
       if (oldWheelRev < wheelRev && currentMillis - oldWheelMillis >= REPORTING_INTERVAL)
       {
         update_chars(1, "wheel");
@@ -543,9 +478,6 @@ void loop()
         //wheelAdd();
         //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
         update_chars(0, "timer");
-        //Serial.print("Loop counter: ");
-        //Serial.println(loop_counter);
-        //loop_counter = 0;
       }
       
       if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)
@@ -573,17 +505,9 @@ void loop()
     // No central is connected. We run with default parameters
     // (PAS level 2, 25km/h speed limit)
     currentMillis = millis();
-#ifdef SIMPLE_POLL
-    poll_wheel_crank_pins();
-#else    
-    if (poll_pin(WHEEL_PIN, &state_prev_wheel, &state_counter_wheel, 5))
-      wheelAdd();
-    if (poll_pin(CRANK_PIN, &state_prev_crank, &state_counter_crank, 3))
-      crankAdd();
-#endif
+    Wheel.poll_pin(wheelAdd);
+    Crank.poll_pin(crankAdd);
 
-    // For debugging
-    //loop_counter++;
     if (currentMillis - previousMillis >= REPORTING_INTERVAL)
     {
       queryVESC();
@@ -596,9 +520,6 @@ void loop()
 #else
       queryVESC();      
 #endif
-      //Serial.print("Loop counter: ");
-      //Serial.println(loop_counter);
-      //loop_counter = 0;
     }
 
     if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)

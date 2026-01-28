@@ -26,13 +26,6 @@ public:
 
   void poll_pin(void addFn(void))
   {
-#if 0 //Simple poll 
-    state_now = digitalRead(pin);
-    if (state_now < state_prev)
-      addFn();
-    
-    state_prev = state_now;
-#else
     // Do a running sum. 
     // Like a running average, but no divides and with integers for speed.
     buf[_index++] = digitalRead(pin);
@@ -47,7 +40,6 @@ public:
       addFn();
     
     state_prev = state_now;
-#endif
   };
 };
 

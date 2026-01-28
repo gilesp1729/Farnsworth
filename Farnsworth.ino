@@ -53,7 +53,7 @@ unsigned short flags = 0x30;
 float static_torque;
 
 // Moving average filter for torque readings
-RunningAverage filter(FILTER_SIZE);
+RunningAverage torqueFilter(FILTER_SIZE);
 
 // Poller for the wheel and crank pins
 Poller Wheel(WHEEL_PIN);
@@ -71,8 +71,8 @@ volatile unsigned long currentMillis = 0;
 // Debouncing counters for wheel and crank interrupt routines
 volatile unsigned long time_prev_wheel = 0, time_now_wheel;
 volatile unsigned long time_prev_crank = 0, time_now_crank;
-volatile unsigned long time_chat_wheel = 100;  // dead zone for bounces
-volatile unsigned long time_chat_crank = 18;  // dead zone for bounces (crank)
+volatile unsigned long time_chat_wheel = 50;  // dead zone for bounces
+volatile unsigned long time_chat_crank = 10;  // dead zone for bounces (crank)
 
 // Counters for updating power and speed services
 volatile unsigned long wheelRev = 0;
@@ -100,10 +100,13 @@ int pas = 2;
 // PAS level multipliers for 5 PAS levels. 
 float pas_mult[6] = { 0, 1.0, 1.8, 2.6, 3.4, 4.2};
 
-volatile unsigned int crankPulses = 0;
-volatile unsigned int crankRev = 0;
+// Counters for cadence reporting
+volatile unsigned long time_prev_crank_avg = 0;
+volatile unsigned int crankPulsesRev = 0;   // pulse counter for whole revolutions
+volatile unsigned int crankPulsesCad = 0;   // pulse counter for averaging out cadence measurement
+volatile unsigned int crankRev = 0;         // rev counter for CSC/CP reporting
 volatile unsigned int oldCrankRev = 0;
-volatile unsigned long lastCranktime = 0;
+volatile unsigned long lastCranktime = 0;   // time counter for CSC/CP reporting
 volatile unsigned long oldCrankMillis = 0;
 
 
@@ -291,15 +294,22 @@ void crankAdd()
   {
     // Read the torque every cadence pulse and add it in to the running average buffer.
     raw_torque = readTorque();
-    filter.addValue(raw_torque);
+    torqueFilter.addValue(raw_torque);
 
     // Calculate the cadence rpm
-    crpm = 60000L / (PULSES_PER_REV * (time_now_crank - time_prev_crank));
+    // The short inter-pulse intervals may need to be added over
+    // a longer time, comparable to the torque filter
+    if (++crankPulsesCad > PULSES_AVG_CAD)
+    {
+      crankPulsesCad = 0;
+      crpm = 60000.0 / (AVG_PER_REV * (time_now_crank - time_prev_crank_avg));
+      time_prev_crank_avg = time_now_crank;
+    }
 
     // If we have completed a full revolution
-    if (++crankPulses > PULSES_PER_REV)
+    if (++crankPulsesRev > PULSES_PER_REV)
     {
-      crankPulses = 0;
+      crankPulsesRev = 0;
       crankRev = crankRev + 1;
       lastCranktime = millis();
     }
@@ -313,7 +323,7 @@ void crankAdd()
 // and send it down to the VESC as a motor current setting.
 void updateVESC()
 {
-  torque = filter.getMaxInBuffer();
+  torque = torqueFilter.getMaxInBuffer();
   power = torque * crpm * (TWO_PI / 60);   // the human average power in watts
 
   if (vesc_connected)
@@ -347,7 +357,7 @@ void zero_on_inactivity()
   {
     speed = 0;
     power = 0;
-    Wheel.clear();
+    //Wheel.clear();
   }
 
   // Similarly for the crank. Zero the filter out to provide a starting ramp
@@ -356,8 +366,8 @@ void zero_on_inactivity()
   {
     crpm = 0;
     power = 0;
-    filter.fillValue(0, FILTER_SIZE);  
-    Crank.clear();
+    torqueFilter.fillValue(0, FILTER_SIZE);  
+    //Crank.clear();
   }
 }
 
@@ -407,7 +417,7 @@ void setup()
   unsigned long t = millis();
   lastWheeltime = t << 1;       // this is in half-ms
   lastCranktime = t;
-  filter.fillValue(0, FILTER_SIZE);   // fill torque running average buffer with zeroes
+  torqueFilter.fillValue(0, FILTER_SIZE);   // fill torque running average buffer with zeroes
   Wheel.clear();
   Crank.clear();              // initialise running sum buffers
 

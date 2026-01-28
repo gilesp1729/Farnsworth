@@ -16,8 +16,16 @@
 // Maxiumum amps sent to VESC. Should be <= the max current set in the VESC.
 #define MAX_AMPS      12
 
-// Cadence pulses per revolution of crank
-#define PULSES_PER_REV 32
+// Cadence pulses per revolution of crank at the SD (speed/direction) line.
+// The quadrature outputs (not used here) may be at this rate or half this rate.
+// Some analog sensors gives 32 pulses/rev.
+#define PULSES_PER_REV  46
+
+// Cadence pulses per cadence averaging interval.
+// Does not have to be a divisor of PULSES_PER_REV, but should be between 1/4 and 1/2.
+// The number of averaging intervals per rev is precalculated here.
+#define PULSES_AVG_CAD  10
+#define AVG_PER_REV     ((float)PULSES_PER_REV / PULSES_AVG_CAD)
 
 // Number of pole-pairs in the motor (only used for debugging prints)
 #define NUM_POLE_PAIRS  5
@@ -40,8 +48,6 @@
 // over some part of a crank revolution, to smooth out dead spots and
 // to provide a starting ramp. The maximum torque is taken for power
 // calculations.
-// 16 = half a crank revolution
-// 32 = a full revolution
-#define FILTER_SIZE 16
+#define FILTER_SIZE 23
 
 

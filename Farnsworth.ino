@@ -509,6 +509,10 @@ void loop()
     Serial.println(central.address());
     BLE.advertise();
     Serial.println("Bluetooth device active, waiting for connections...");
+
+    // Reinstate defaults in case we ride away without powering off and on
+    speed_limit = 2500;
+    pas = 2;
   }
   else
   {
@@ -520,7 +524,6 @@ void loop()
 
     if (currentMillis - previousMillis >= REPORTING_INTERVAL)
     {
-      queryVESC();
 #if 0
       // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
       //wheelAdd();

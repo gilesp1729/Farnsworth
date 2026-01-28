@@ -24,7 +24,7 @@
 // Cadence pulses per cadence averaging interval.
 // Does not have to be a divisor of PULSES_PER_REV, but should be between 1/4 and 1/2.
 // The number of averaging intervals per rev is precalculated here.
-#define PULSES_AVG_CAD  10
+#define PULSES_AVG_CAD  12
 #define AVG_PER_REV     ((float)PULSES_PER_REV / PULSES_AVG_CAD)
 
 // Number of pole-pairs in the motor (only used for debugging prints)

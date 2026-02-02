@@ -84,7 +84,7 @@ volatile float raw_torque = 0;              // torque in Nm read from sensor
 volatile float torque = 0;                  // averaged torque in Nm
 volatile float speed = 0;                   // calculated speed in km/h
 volatile float crpm = 0;                    // calculated crank rpm
-short power = 0;                            // human power in watts
+short power = 0;                            // motor power in watts
 float req_amps;                             // requested amps sent to VESC
 
 // Wheel circumference and initial speed limit for motor
@@ -94,11 +94,11 @@ unsigned long speed_limit = 2500;     // km/h*100
 // Ramp down speed from speed_limit to speed_lnmit + speed_ramp
 float speed_ramp = 4.0;
 
-// PAS level for motor (1 = eco, 2 = tour, 3 = sport, etc.)
-int pas = 2;
+// PAS level for motor (1 = eco, 2 = tour, 3 = sport, etc. up to 5)
+int pas = 3;
 
 // PAS level multipliers for 5 PAS levels. 
-float pas_mult[6] = { 0, 1.0, 1.8, 2.6, 3.4, 4.2};
+float pas_mult[6] = { 0, 1.0, 1.8, 2.4, 3.6, 4.5};
 
 // Counters for cadence reporting
 volatile unsigned long time_prev_crank_avg = 0;
@@ -158,8 +158,8 @@ void fillMS()
   bleBuffer[n++] = kmh100 & 0xff;		                // speed in km/h*100
   bleBuffer[n++] = (kmh100 >> 8) & 0xff;	   
   bleBuffer[n++] = crpm;			                      // cadence in rpm
-  bleBuffer[n++] = (int)(power * pas_mult[pas]) & 0xff;		        // motor power in watts = human power * PAS multiplier
-  bleBuffer[n++] = ((int)(power * pas_mult[pas]) >> 8) & 0xff;	   
+  bleBuffer[n++] = power & 0xff;		                // motor power in watts
+  bleBuffer[n++] = (power >> 8) & 0xff;	   
   bleBuffer[n++] = volts100 & 0xff;		              // battery volts*100
   bleBuffer[n++] = (volts100 >> 8) & 0xff;	   
   bleBuffer[n++] = amps100 & 0xff;		              // motor current in amps*100
@@ -199,7 +199,10 @@ void queryVESC()
   if ( VU.getVescValues() ) 
   {
     vesc_connected = true;
-  #if 0
+
+    // calculate the motor's actual power
+    power = VU.data.inpVoltage * VU.data.avgInputCurrent;
+#if 0
     Serial.print("RPM ");
     Serial.print(VU.data.rpm / NUM_POLE_PAIRS);
     Serial.print(" Volts ");
@@ -255,7 +258,7 @@ void update_chars(bool calc_power, String sType)
   Serial.print(raw_torque);
   Serial.print("Torque avg ");
   Serial.print(torque);
-  Serial.print(" (Human)Power : ");
+  Serial.print(" Power : ");
   Serial.println(power);
 }
 
@@ -319,19 +322,19 @@ void crankAdd()
 }
 
 
-// Calculate power from peak torque and cadence. Multiply by the PAS multiplier
+// Calculate human power from peak torque and cadence. Multiply by the PAS multiplier
 // and send it down to the VESC as a motor current setting.
 void updateVESC()
 {
-  torque = torqueFilter.getMaxInBuffer();
-  power = torque * crpm * (TWO_PI / 60);   // the human average power in watts
+  float watts = torque * crpm * (TWO_PI / 60);   // the human average power in watts
 
+  torque = torqueFilter.getMaxInBuffer();
   if (vesc_connected)
   {
     // Set motor current based on power and PAS multiplier.
     
     // Sanity check the current to be between 0 and MAX_AMPS.
-    req_amps = pas_mult[pas] * power / VU.data.inpVoltage;
+    req_amps = pas_mult[pas] * watts / VU.data.inpVoltage;
     if (req_amps < 0)
       req_amps = 0;
     else if (req_amps > MAX_AMPS)
@@ -374,6 +377,8 @@ void zero_on_inactivity()
 void setup()
 {
   int count = 0;
+  char buf[20];
+  char devname[32];
 
   Serial.begin(9600);  // initialize serial communication
   Serial1.begin(115200); // Initialise serial comms with VESC
@@ -395,7 +400,12 @@ void setup()
 
   // Initialise BLE and establish cycling power characteristics
   BLE.begin();
-  BLE.setLocalName("Farnsworth");
+  strcpy(buf, BLE.address().c_str());
+  Serial.print("My MAC address: ");
+  Serial.println(buf);
+  strcpy(devname, "Farnsworth");
+  strcat(devname, buf + 12);
+  BLE.setLocalName(devname);
   BLE.setAdvertisedService(CyclePowerService);
   CyclePowerService.addCharacteristic(CyclePowerFeature);
   CyclePowerService.addCharacteristic(CyclePowerMeasurement);
@@ -487,6 +497,9 @@ void loop()
         // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
         //wheelAdd();
         //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
+        // simulate some power output
+        //power = 250;
+        
         update_chars(0, "timer");
       }
       
@@ -512,27 +525,19 @@ void loop()
 
     // Reinstate defaults in case we ride away without powering off and on
     speed_limit = 2500;
-    pas = 2;
+    pas = 3;
   }
   else
   {
     // No central is connected. We run with default parameters
-    // (PAS level 2, 25km/h speed limit)
+    // (PAS level 3, 25km/h speed limit)
     currentMillis = millis();
     Wheel.poll_pin(wheelAdd);
     Crank.poll_pin(crankAdd);
 
     if (currentMillis - previousMillis >= REPORTING_INTERVAL)
     {
-#if 0
-      // simulate some speed on the wheel, 500ms per rev ~16km/h, 800ms ~10km/h
-      //wheelAdd();
-      //crankAdd();  // don't do this, it will look very slow (only 1/32 of a rev)
-
       update_chars(0, "timer");
-#else
-      queryVESC();      
-#endif
     }
 
     if (currentMillis - previousPowerCalc >= POWER_CALC_INTERVAL)

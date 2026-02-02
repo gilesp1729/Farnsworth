@@ -38,7 +38,7 @@ The phase wires and the torque sensor/temp sensor wires come out of the top of t
 
 ![2025-12-16 16.35.41.jpg](assets/e424081b1db17b51ed1962ccfad85ceede3a8939.jpg)
 
-Testing the motor with the [Spintend Ubox 100V/100A Vesc](https://spintend.com/collections/esc-based-on-vesc/products/single-ubox-aluminum-controller-100v-100a-based-on-vesc). On the left is a cheap [20 amp buck converter](https://www.kogan.com/au/buy/connecttriad-cnc-adjustable-power-supply-20a-1200w-lcd-display-is34049-1-ctxxy-0515/?utm_campaign=postsaleorderconfirm&utm_medium=email&utm_source=kogan)) that takes 48V in from the battery and allows current limiting and reduced voltage for testing.
+Testing the motor with the [Spintend Ubox 100V/100A Vesc](https://spintend.com/collections/esc-based-on-vesc/products/single-ubox-aluminum-controller-100v-100a-based-on-vesc). On the left is a cheap [20 amp buck converter](https://www.kogan.com/au/buy/connecttriad-cnc-adjustable-power-supply-20a-1200w-lcd-display-is34049-1-ctxxy-0515/?utm_campaign=postsaleorderconfirm&utm_medium=email&utm_source=kogan) that takes 48V in from the battery and allows current limiting and reduced voltage for testing.
 
 ![2026-01-03 14.32.52.jpg](assets/35ad150fe3c49171f3f64a82bf32cf34c6c7a9bb.jpg)
 

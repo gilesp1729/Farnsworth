@@ -1,6 +1,6 @@
 #include <ArduinoBLE.h>
 #include <RunningAverage.h>
-//#include <NanoBLEFlashPrefs.h>
+#include <NanoBLEFlashPrefs.h>
 #include <VescUart.h>
 
 // Farnsworth
@@ -30,14 +30,14 @@ int BatteryPercent = 100;  // start with 100% full
 
 // Babelfish motor service and characteristics
 BLEService motorService("FFF0");
-BLECharacteristic motorMeasurement("FFF1", BLERead | BLENotify, 14);
+BLECharacteristic motorMeasurement("FFF1", BLERead | BLENotify, 21);
 BLECharacteristic motorSettings("FFF2", BLERead | BLENotify, 7);
 BLECharacteristic motorNewSettings("FFF3", BLEWrite, 7);
 
 int sensor_pos = 11;      // sensor position magic number.
 // No idea what they mean (shitty specs) but it's mandatory to supply one.
 
-unsigned char bleBuffer[14];
+unsigned char bleBuffer[17];
 unsigned char slBuffer[1];
 unsigned char fBuffer[4];
 int connected = 0;
@@ -54,6 +54,9 @@ float static_torque;
 
 // Moving average filter for torque readings
 RunningAverage torqueFilter(FILTER_SIZE);
+
+// Access to the flash (non-volatile) memory
+NanoBLEFlashPrefs flash;
 
 // Poller for the wheel and crank pins
 Poller Wheel(WHEEL_PIN);
@@ -90,6 +93,9 @@ float req_amps;                             // requested amps sent to VESC
 // Wheel circumference and initial speed limit for motor
 unsigned long circ = 2300;            // mm
 unsigned long speed_limit = 2500;     // km/h*100
+
+// Odometer rev counter in mm*100 (so steps of 23 for a 2300mm circ)
+unsigned long odometer = 0;
 
 // Ramp down speed from speed_limit to speed_lnmit + speed_ramp
 float speed_ramp = 4.0;
@@ -153,6 +159,8 @@ void fillMS()
   uint16_t amps100 = VU.data.avgInputCurrent * 100;
   uint16_t req_amps100 = req_amps * 100;
   uint16_t kmh100 = speed * 100;
+  uint16_t phase_amps100 = VU.data.avgMotorCurrent * 100;
+  uint8_t duty_percent = VU.data.dutyCycleNow * 100;
 
   int n = 0;  // to facilitate adding and removing stuff
   bleBuffer[n++] = kmh100 & 0xff;		                // speed in km/h*100
@@ -162,13 +170,21 @@ void fillMS()
   bleBuffer[n++] = (power >> 8) & 0xff;	   
   bleBuffer[n++] = volts100 & 0xff;		              // battery volts*100
   bleBuffer[n++] = (volts100 >> 8) & 0xff;	   
-  bleBuffer[n++] = amps100 & 0xff;		              // motor current in amps*100
+  bleBuffer[n++] = amps100 & 0xff;		              // motor input current in amps*100
   bleBuffer[n++] = (amps100 >> 8) & 0xff;	   
   bleBuffer[n++] = req_amps100 & 0xff;		          // requested motor current in amps*100
   bleBuffer[n++] = (req_amps100 >> 8) & 0xff;				      
   bleBuffer[n++] = pas;			                          // Unused (PAS left here for backward compatibility)
   bleBuffer[n++] = (uint8_t)(VU.data.tempMotor + 40);		// Motor temp in degC + 40			      
   bleBuffer[n++] = (uint8_t)(VU.data.tempMosfet + 40);	// Controller temp in degC + 40		      
+  bleBuffer[n++] = duty_percent;                      // Duty cycle in percent
+  bleBuffer[n++] = phase_amps100 & 0xff;		          // motor phase current in amps*100
+  bleBuffer[n++] = (phase_amps100 >> 8) & 0xff;	  
+  bleBuffer[n++] = odometer & 0xff;
+  bleBuffer[n++] = (odometer >> 8) & 0xff;  // UInt32
+  bleBuffer[n++] = (odometer >> 16) & 0xff;
+  bleBuffer[n++] = (odometer >> 24) & 0xff;
+
   motorMeasurement.writeValue(bleBuffer, n);				      
 
   n = 0;								      
@@ -185,10 +201,19 @@ void fillMS()
 // Check if writable characteristics have changed from the central.
 void check_writable_chars()
 {
+  unsigned long new_circ;
+
   motorNewSettings.readValue(bleBuffer, 7);
   speed_limit = bleBuffer[0] + ((uint16_t)bleBuffer[1] << 8);
-  circ = bleBuffer[2] + ((uint16_t)bleBuffer[3] << 8);
+  new_circ = bleBuffer[2] + ((uint16_t)bleBuffer[3] << 8);
   pas = bleBuffer[4];
+
+  // If circ has changed, save it to the flash.
+  if (new_circ != circ)
+  {
+    circ = new_circ;
+    updateFlash(false);
+  }
 }
 
 // Get VESC stats
@@ -200,7 +225,7 @@ void queryVESC()
   {
     vesc_connected = true;
 
-    // calculate the motor's actual power
+    // calculate the motor's actual input power
     power = VU.data.inpVoltage * VU.data.avgInputCurrent;
 #if 0
     Serial.print("RPM ");
@@ -259,7 +284,9 @@ void update_chars(bool calc_power, String sType)
   Serial.print("Torque avg ");
   Serial.print(torque);
   Serial.print(" Power : ");
-  Serial.println(power);
+  Serial.print(power);
+  Serial.print(" Odo ");
+  Serial.println(odometer);
 }
 
 // Interrupt routines trigger when a pulse is received (falling edge on pin)
@@ -273,6 +300,7 @@ void wheelAdd()
 
     // Update the wheel counter and remember the time of last update
     wheelRev = wheelRev + 1;
+    odometer = odometer + (circ / 100);
     time_prev_wheel = time_now_wheel;
     lastWheeltime = millis() << 1;
   }
@@ -326,9 +354,10 @@ void crankAdd()
 // and send it down to the VESC as a motor current setting.
 void updateVESC()
 {
-  float watts = torque * crpm * (TWO_PI / 60);   // the human average power in watts
+  float watts;
 
   torque = torqueFilter.getMaxInBuffer();
+  watts = torque * crpm * (TWO_PI / 60);   // the human average power in watts
   if (vesc_connected)
   {
     // Set motor current based on power and PAS multiplier.
@@ -352,15 +381,50 @@ void updateVESC()
   }
 }
 
-  // if the wheel timer has not been updated for 4 seconds, zero out the
-  // internal speed abd cadence values, so the power resets to zero.
+// Update the odometer and circ in flash memory. Do this occasionally, when bike stops,
+// when disconnecting, or when a new circ is sent from the central.
+typedef struct FlashPrefs
+{
+  unsigned long odometer;
+  unsigned long circ;
+} FlashPrefs;
+
+void updateFlash(bool clear)
+{
+  FlashPrefs prefs;
+  
+  if (clear)
+  {
+    flash.deletePrefs();
+    flash.garbageCollection();
+  }
+
+  prefs.odometer = odometer;
+  prefs.circ = circ;
+  flash.writePrefs(&prefs, sizeof(prefs));  
+}
+
+// Read the flash contents at setup
+void readFlash()
+{
+  FlashPrefs prefs;
+
+  flash.readPrefs(&prefs, sizeof(prefs));
+  odometer = prefs.odometer;
+  circ = prefs.circ;
+}
+
+// if the wheel timer has not been updated for ~2 seconds, zero out the
+// internal speed and cadence values, so the power resets to zero.
 void zero_on_inactivity()
 {
   if (currentMillis > time_prev_wheel + WHEEL_INACTIVITY_INTERVAL)
   {
     speed = 0;
     power = 0;
-    //Wheel.clear();
+
+    // Write cumulative wheelRev to odometer in non-volatile here
+    updateFlash(false);
   }
 
   // Similarly for the crank. Zero the filter out to provide a starting ramp
@@ -370,7 +434,6 @@ void zero_on_inactivity()
     crpm = 0;
     power = 0;
     torqueFilter.fillValue(0, FILTER_SIZE);  
-    //Crank.clear();
   }
 }
 
@@ -430,6 +493,15 @@ void setup()
   torqueFilter.fillValue(0, FILTER_SIZE);   // fill torque running average buffer with zeroes
   Wheel.clear();
   Crank.clear();              // initialise running sum buffers
+
+  // Read back odometer and circ from flash. Note that the speed limit is
+  // not stored here as we want it to rever to 25km/h every startup
+//#define CLEAR_FLASH
+#ifdef CLEAR_FLASH  // define this once to clear it from the outset
+  updateFlash(true);
+#else
+  readFlash();
+#endif
 
   // Write the initial values of the CP (power) characteristics
   slBuffer[0] = sensor_pos & 0xff;
@@ -515,9 +587,10 @@ void loop()
       zero_on_inactivity();
     }
 
-    // when the central disconnects, turn off the LED:
+    // when the central disconnects, turn off the LED, update the flash, and re-advertise.
     connected = 0;
     digitalWrite(LED_BUILTIN, LOW);
+    updateFlash(false);
     Serial.print("Disconnected from central: ");
     Serial.println(central.address());
     BLE.advertise();
@@ -537,6 +610,7 @@ void loop()
 
     if (currentMillis - previousMillis >= REPORTING_INTERVAL)
     {
+      //wheelAdd();
       update_chars(0, "timer");
     }
 
